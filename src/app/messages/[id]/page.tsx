@@ -4,10 +4,10 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { toast } from "react-hot-toast";
-import { apiGetProduct, apiSendMessage, apiThread } from "../../../../lib/api/marketplace";
-import { useUserProfile } from "../../../../components/providers/UserProvider";
-import type { Message } from "../../../../lib/types";
-import AuthGate from "../../../../components/AuthGate";
+import { apiGetProduct, apiSendMessage, apiThread } from "../../../lib/api/marketplace";
+import { useUserProfile } from "../../../components/providers/UserProvider";
+import type { Message } from "../../../lib/types";
+import AuthGate from "../../../components/AuthGate";
 
 function normalizeLower(s: string) {
   return s.trim().toLowerCase();

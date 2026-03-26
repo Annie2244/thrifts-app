@@ -14,6 +14,7 @@ function pickInboxName(buyerName: string, sellerName: string, mode: "buyer" | "s
 export default function MessagesInboxPage() {
   const { buyerName, sellerName } = useUserProfile();
   const [mode, setMode] = useState<"buyer" | "seller">("buyer");
+  const [mounted, setMounted] = useState(false);
   const [threads, setThreads] = useState<
     { threadKey: string; product_id: string; other: string; lastMessageAt: string; preview: string }[]
   >([]);
@@ -25,6 +26,10 @@ export default function MessagesInboxPage() {
   useEffect(() => {
     if (!buyerName && sellerName) setMode("seller");
   }, [buyerName, sellerName]);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -137,7 +142,9 @@ export default function MessagesInboxPage() {
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center justify-between gap-3">
                           <div className="font-extrabold truncate">{t.other}</div>
-                          <div className="text-xs text-black/60">{new Date(t.lastMessageAt).toLocaleString()}</div>
+                          <div className="text-xs text-black/60">
+                            {mounted ? new Date(t.lastMessageAt).toLocaleString() : "--"}
+                          </div>
                         </div>
                         <div className="text-sm text-black/60 truncate mt-1">{t.preview}</div>
                       </div>

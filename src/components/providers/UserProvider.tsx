@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useMemo, useState } from "react";
+import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
 
 type UserProfile = {
   buyerName: string;
@@ -33,14 +33,17 @@ function safeParse(raw: string | null): UserProfile | null {
 }
 
 export function UserProvider({ children }: { children: React.ReactNode }) {
-  const [buyerName, setBuyerNameState] = useState<string>(() => {
-    if (typeof window === "undefined") return "";
-    return safeParse(window.localStorage.getItem(STORAGE_KEY))?.buyerName ?? "";
-  });
-  const [sellerName, setSellerNameState] = useState<string>(() => {
-    if (typeof window === "undefined") return "";
-    return safeParse(window.localStorage.getItem(STORAGE_KEY))?.sellerName ?? "";
-  });
+  const [buyerName, setBuyerNameState] = useState<string>("");
+  const [sellerName, setSellerNameState] = useState<string>("");
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = safeParse(window.localStorage.getItem(STORAGE_KEY));
+    if (stored) {
+      setBuyerNameState(stored.buyerName ?? "");
+      setSellerNameState(stored.sellerName ?? "");
+    }
+  }, []);
 
   const value = useMemo<UserContextValue>(
     () => ({
@@ -87,4 +90,3 @@ export function useUserProfile() {
   if (!ctx) throw new Error("useUserProfile must be used within UserProvider");
   return ctx;
 }
-

@@ -1,5 +1,6 @@
 import { nanoid } from "nanoid";
 import { DEFAULT_COMMISSION_RATE } from "../config";
+import { supabase, hasSupabase } from "../supabase";
 import type {
   Comment,
   MarketplaceFilters,
@@ -64,6 +65,38 @@ function sanitizeDb(db: MockDb): MockDb {
   return { ...db, products };
 }
 
+function normalizeProduct(raw: any): Product {
+  return {
+    ...raw,
+    price: typeof raw.price === "string" ? Number(raw.price) : raw.price,
+    views: typeof raw.views === "string" ? Number(raw.views) : raw.views,
+    images: ensureArray(raw.images).filter(isValidImageUrl),
+  } as Product;
+}
+
+function normalizeOrder(raw: any): Order {
+  return {
+    ...raw,
+    total: typeof raw.total === "string" ? Number(raw.total) : raw.total ?? 0,
+    commission:
+      typeof raw.commission === "string" ? Number(raw.commission) : raw.commission ?? 0,
+    items: ensureArray(raw.items) as OrderItem[],
+  } as Order;
+}
+
+function computeSellerTotals(seller: Seller, orders: Order[]) {
+  const gross = orders.reduce((sum, order) => {
+    const subtotal = order.items
+      .filter((it) => it.seller_id === seller.id)
+      .reduce((s, it) => s + (it.price ?? 0) * it.quantity, 0);
+    return sum + subtotal;
+  }, 0);
+  const rate = seller.commission_rate ?? DEFAULT_COMMISSION_RATE;
+  const commission = gross * rate;
+  const net = gross - commission;
+  return { gross, commission, net };
+}
+
 export function apiCleanupInvalidImages() {
   const db = loadDb();
   let removed = 0;
@@ -88,17 +121,27 @@ export function apiCleanupInvalidImages() {
   return { removed };
 }
 
-export function apiRemoveProductsByIds(ids: string[]) {
+export async function apiRemoveProductsByIds(ids: string[]) {
   if (!ids.length) return { removed: 0 };
-  const db = loadDb();
-  const before = db.products.length;
-  const set = new Set(ids);
-  const products = db.products.filter((p) => !set.has(p.id));
-  const removed = before - products.length;
-  if (removed > 0) {
-    saveDb({ ...db, products });
+  if (!hasSupabase) {
+    const db = loadDb();
+    const before = db.products.length;
+    const set = new Set(ids);
+    const products = db.products.filter((p) => !set.has(p.id));
+    const removed = before - products.length;
+    if (removed > 0) {
+      saveDb({ ...db, products });
+    }
+    return { removed };
   }
-  return { removed };
+
+  const { data, error } = await supabase
+    .from("products")
+    .delete()
+    .in("id", ids)
+    .select("id");
+  if (error) throw error;
+  return { removed: data?.length ?? 0 };
 }
 
 /* ---------------- SEED ---------------- */
@@ -197,7 +240,7 @@ export function apiUpsertSellerByName(name: string): Seller {
 
 /* ---------------- PRODUCTS ---------------- */
 
-export function apiListProducts(filters?: MarketplaceFilters): Product[] {
+function listProductsLocal(filters?: MarketplaceFilters): Product[] {
   const db = loadDb();
   let items = [...db.products];
 
@@ -233,7 +276,39 @@ export function apiListProducts(filters?: MarketplaceFilters): Product[] {
   return items.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
 }
 
-export function apiCreateProduct(input: {
+export async function apiListProducts(filters?: MarketplaceFilters): Promise<Product[]> {
+  if (!hasSupabase) return listProductsLocal(filters);
+
+  let query = supabase.from("products").select("*");
+
+  if (filters?.q) {
+    const q = filters.q.trim();
+    if (q) {
+      query = query.or(`title.ilike.%${q}%,description.ilike.%${q}%`);
+    }
+  }
+  if (filters?.category) {
+    query = query.eq("category", filters.category);
+  }
+  if (filters?.condition) {
+    query = query.eq("condition", filters.condition);
+  }
+  if (filters?.size) {
+    query = query.ilike("size", `%${filters.size}%`);
+  }
+  if (typeof filters?.minPrice === "number") {
+    query = query.gte("price", filters.minPrice);
+  }
+  if (typeof filters?.maxPrice === "number") {
+    query = query.lte("price", filters.maxPrice);
+  }
+
+  const { data, error } = await query.order("created_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map(normalizeProduct);
+}
+
+export async function apiCreateProduct(input: {
   sellerName: string;
   title: string;
   description: string;
@@ -242,10 +317,7 @@ export function apiCreateProduct(input: {
   size: string;
   condition: ProductCondition;
   images: string[];
-}): Product {
-  const db = loadDb();
-  const seller = apiUpsertSellerByName(input.sellerName);
-
+}): Promise<Product> {
   const validImages =
     input.images && input.images.length > 0 && input.images[0]
       ? input.images
@@ -253,9 +325,31 @@ export function apiCreateProduct(input: {
           "https://images.unsplash.com/photo-1521335629791-ce4aec67dd53?auto=format&fit=crop&w=1200&q=80",
         ];
 
+  if (!hasSupabase) {
+    const db = loadDb();
+    const seller = apiUpsertSellerByName(input.sellerName);
+    const product: Product = {
+      id: nanoid(),
+      seller_id: seller.id,
+      title: input.title.trim(),
+      description: input.description.trim(),
+      price: Math.round(input.price),
+      images: validImages,
+      category: input.category,
+      size: input.size,
+      condition: input.condition,
+      views: 0,
+      created_at: nowIso(),
+    };
+    db.products.unshift(product);
+    saveDb(db);
+    return product;
+  }
+
   const product: Product = {
     id: nanoid(),
-    seller_id: seller.id,
+    seller_id: input.sellerName.trim(),
+    seller_name: input.sellerName.trim(),
     title: input.title.trim(),
     description: input.description.trim(),
     price: Math.round(input.price),
@@ -267,22 +361,23 @@ export function apiCreateProduct(input: {
     created_at: nowIso(),
   };
 
-  db.products.unshift(product);
-  saveDb(db);
-
-  return product;
+  const { data, error } = await supabase
+    .from("products")
+    .insert(product)
+    .select("*")
+    .single();
+  if (error) throw error;
+  return normalizeProduct(data);
 }
 
 /* ---------------- REVIEWS ---------------- */
 
-export function apiCreateReview(input: {
+export async function apiCreateReview(input: {
   productId: string;
   userName: string;
   rating: number;
   comment: string;
-}): Review {
-  const db = loadDb();
-
+}): Promise<Review> {
   const review: Review = {
     id: nanoid(),
     product_id: input.productId,
@@ -292,20 +387,29 @@ export function apiCreateReview(input: {
     created_at: nowIso(),
   };
 
-  db.reviews.unshift(review);
-  saveDb(db);
-  return review;
+  if (!hasSupabase) {
+    const db = loadDb();
+    db.reviews.unshift(review);
+    saveDb(db);
+    return review;
+  }
+
+  const { data, error } = await supabase
+    .from("reviews")
+    .insert(review)
+    .select("*")
+    .single();
+  if (error) throw error;
+  return data as Review;
 }
 
 /* ---------------- COMMENTS ---------------- */
 
-export function apiCreateComment(input: {
+export async function apiCreateComment(input: {
   productId: string;
   userName: string;
   comment: string;
-}): Comment {
-  const db = loadDb();
-
+}): Promise<Comment> {
   const c: Comment = {
     id: nanoid(),
     product_id: input.productId,
@@ -314,90 +418,181 @@ export function apiCreateComment(input: {
     created_at: nowIso(),
   };
 
-  db.comments.unshift(c);
-  saveDb(db);
-  return c;
+  if (!hasSupabase) {
+    const db = loadDb();
+    db.comments.unshift(c);
+    saveDb(db);
+    return c;
+  }
+
+  const { data, error } = await supabase
+    .from("comments")
+    .insert(c)
+    .select("*")
+    .single();
+  if (error) throw error;
+  return data as Comment;
 }
 
 /* ---------------- VIEWS ---------------- */
 
-export function apiIncrementProductViews(productId: string) {
-  const db = loadDb();
-  const product = db.products.find((p) => p.id === productId);
-  if (!product) return;
+export async function apiIncrementProductViews(productId: string) {
+  if (!hasSupabase) {
+    const db = loadDb();
+    const product = db.products.find((p) => p.id === productId);
+    if (!product) return 0;
 
-  product.views += 1;
+    product.views += 1;
 
-  db.product_view_events.push({
-    id: nanoid(),
-    product_id: productId,
-    created_at: nowIso(),
-  });
+    db.product_view_events.push({
+      id: nanoid(),
+      product_id: productId,
+      created_at: nowIso(),
+    });
 
-  saveDb(db);
+    saveDb(db);
+    return product.views;
+  }
+
+  const { data: current, error: readError } = await supabase
+    .from("products")
+    .select("views")
+    .eq("id", productId)
+    .single();
+  if (readError) throw readError;
+
+  const currentViews =
+    typeof current?.views === "string" ? Number(current.views) : current?.views ?? 0;
+  const nextViews = currentViews + 1;
+  const { error: writeError } = await supabase
+    .from("products")
+    .update({ views: nextViews })
+    .eq("id", productId);
+  if (writeError) throw writeError;
+  return nextViews;
 }
 
 /* ---------------- ORDERS ---------------- */
 
-export function apiCreateOrder(input: {
+export async function apiCreateOrder(input: {
   buyerName: string;
   items: { productId: string; quantity: number; size: string }[];
-}): Order {
-  const db = loadDb();
+}): Promise<Order> {
+  const uniqueIds = Array.from(new Set(input.items.map((it) => it.productId)));
+  const productMap = new Map<string, Product>();
+  const localDb = !hasSupabase ? loadDb() : null;
+
+  if (uniqueIds.length) {
+    if (localDb) {
+      for (const p of localDb.products) {
+        if (uniqueIds.includes(p.id)) productMap.set(p.id, p);
+      }
+    } else {
+      const { data, error } = await supabase
+        .from("products")
+        .select("id,seller_id,title,price")
+        .in("id", uniqueIds);
+      if (error) throw error;
+      (data ?? []).forEach((p) => productMap.set(p.id, p as Product));
+    }
+  }
+
+  const orderItems: OrderItem[] = input.items.map((it) => {
+    const p = productMap.get(it.productId);
+    return {
+      product_id: it.productId,
+      seller_id: p?.seller_id ?? "",
+      title: p?.title ?? "",
+      price: p?.price ?? 0,
+      quantity: it.quantity,
+      size: it.size,
+    };
+  });
+
+  const total = orderItems.reduce((sum, it) => sum + (it.price ?? 0) * it.quantity, 0);
+  const commission = total * DEFAULT_COMMISSION_RATE;
 
   const order: Order = {
     id: nanoid(),
     buyer_name: input.buyerName,
-    items: input.items.map(
-      (it): OrderItem => ({
-        product_id: it.productId,
-        seller_id: "",
-        title: "",
-        price: 0,
-        quantity: it.quantity,
-        size: it.size,
-      })
-    ),
-    total: 0,
-    commission: 0,
+    items: orderItems,
+    total,
+    commission,
     status: "pending",
     created_at: nowIso(),
   };
 
-  db.orders.unshift(order);
-  saveDb(db);
-  return order;
+  if (localDb) {
+    localDb.orders.unshift(order);
+    saveDb(localDb);
+    return order;
+  }
+
+  const { data, error } = await supabase
+    .from("orders")
+    .insert(order)
+    .select("*")
+    .single();
+  if (error) throw error;
+  return normalizeOrder(data);
 }
 
-export function apiListOrdersByBuyer(buyerName: string): Order[] {
-  const db = loadDb();
-  return db.orders.filter(
-    (o) => o.buyer_name.toLowerCase() === buyerName.toLowerCase()
-  );
+export async function apiListOrdersByBuyer(buyerName: string): Promise<Order[]> {
+  if (!buyerName.trim()) return [];
+  if (!hasSupabase) {
+    const db = loadDb();
+    return db.orders.filter(
+      (o) => o.buyer_name.toLowerCase() === buyerName.toLowerCase()
+    );
+  }
+
+  const { data, error } = await supabase
+    .from("orders")
+    .select("*")
+    .eq("buyer_name", buyerName.trim())
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map(normalizeOrder);
 }
 
-export function apiListOrdersBySeller(sellerName: string): Order[] {
-  const db = loadDb();
+export async function apiListOrdersBySeller(sellerName: string): Promise<Order[]> {
+  if (!sellerName.trim()) return [];
+  if (!hasSupabase) {
+    const db = loadDb();
+    const seller = db.sellers.find(
+      (s) => s.name.toLowerCase() === sellerName.toLowerCase()
+    );
+    if (!seller) return [];
+    return db.orders.filter((o) =>
+      o.items.some((it) => it.seller_id === seller.id)
+    );
+  }
 
-  const seller = db.sellers.find(
-    (s) => s.name.toLowerCase() === sellerName.toLowerCase()
-  );
+  const { data: seller, error: sellerError } = await supabase
+    .from("sellers")
+    .select("id")
+    .ilike("name", sellerName.trim())
+    .maybeSingle();
+  if (sellerError) throw sellerError;
+  if (!seller?.id) return [];
 
-  if (!seller) return [];
-
-  return db.orders;
+  const { data, error } = await supabase
+    .from("orders")
+    .select("*")
+    .contains("items", [{ seller_id: seller.id }])
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map(normalizeOrder);
 }
 
 /* ---------------- MESSAGING ---------------- */
 
-export function apiSendMessage(input: {
+export async function apiSendMessage(input: {
   sender: string;
   receiver: string;
   productId: string;
   message: string;
-}): Message {
-  const db = loadDb();
-
+}): Promise<Message> {
   const msg: Message = {
     id: nanoid(),
     sender: input.sender,
@@ -407,74 +602,190 @@ export function apiSendMessage(input: {
     created_at: nowIso(),
   };
 
-  db.messages.unshift(msg);
-  saveDb(db);
-  return msg;
+  if (!hasSupabase) {
+    const db = loadDb();
+    db.messages.unshift(msg);
+    saveDb(db);
+    return msg;
+  }
+
+  const { data, error } = await supabase.from("messages").insert(msg).select("*").single();
+  if (error) throw error;
+  return data as Message;
 }
 
-export function apiInbox(userName: string) {
-  const db = loadDb();
-  return db.messages.filter(
+export async function apiInbox(userName: string): Promise<Message[]> {
+  if (!userName.trim()) return [];
+  if (!hasSupabase) {
+    const db = loadDb();
+    return db.messages.filter(
+      (m) =>
+        m.sender.toLowerCase() === userName.toLowerCase() ||
+        m.receiver.toLowerCase() === userName.toLowerCase()
+    );
+  }
+
+  const { data, error } = await supabase
+    .from("messages")
+    .select("*")
+    .or(`sender.eq.${userName},receiver.eq.${userName}`)
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as Message[];
+}
+
+function parseThreadKey(threadKey: string) {
+  const parts = threadKey.split("::").filter(Boolean);
+  const productId = parts[0] ?? "";
+  const participants = parts.slice(1, 3);
+  return { productId, participants };
+}
+
+export async function apiThread(threadKey: string): Promise<Message[]> {
+  const { productId, participants } = parseThreadKey(threadKey);
+  if (!productId) return [];
+  if (!hasSupabase) {
+    const db = loadDb();
+    const lower = participants.map((p) => p.toLowerCase());
+    return db.messages.filter(
+      (m) =>
+        m.product_id === productId &&
+        (lower.length === 0 ||
+          (lower.includes(m.sender.toLowerCase()) && lower.includes(m.receiver.toLowerCase())))
+    );
+  }
+
+  const { data, error } = await supabase
+    .from("messages")
+    .select("*")
+    .eq("product_id", productId)
+    .order("created_at", { ascending: true });
+  if (error) throw error;
+
+  const messages = (data ?? []) as Message[];
+  if (!participants.length) return messages;
+  const lower = participants.map((p) => p.toLowerCase());
+  return messages.filter(
     (m) =>
-      m.sender.toLowerCase() === userName.toLowerCase() ||
-      m.receiver.toLowerCase() === userName.toLowerCase()
+      lower.includes(m.sender.toLowerCase()) && lower.includes(m.receiver.toLowerCase())
   );
-}
-
-export function apiThread(threadKey: string) {
-  const db = loadDb();
-  return db.messages.filter((m) => m.product_id === threadKey);
 }
 
 /* ---------------- SELLER STATS ---------------- */
 
-export function apiSellerStats(sellerName: string) {
-  const db = loadDb();
-  const seller = db.sellers.find(
-    (s) => s.name.toLowerCase() === sellerName.toLowerCase()
-  );
+export async function apiSellerStats(sellerName: string) {
+  if (!sellerName.trim()) return null;
+  if (!hasSupabase) {
+    const db = loadDb();
+    const seller = db.sellers.find(
+      (s) => s.name.toLowerCase() === sellerName.toLowerCase()
+    );
+    if (!seller) return null;
+    const totals = computeSellerTotals(seller, db.orders);
+    return { ...seller, ...totals };
+  }
 
-  return seller;
+  const { data: seller, error } = await supabase
+    .from("sellers")
+    .select("*")
+    .ilike("name", sellerName.trim())
+    .maybeSingle();
+  if (error) throw error;
+  if (!seller) return null;
+
+  const { data: orders, error: ordersError } = await supabase
+    .from("orders")
+    .select("*")
+    .contains("items", [{ seller_id: seller.id }]);
+  if (ordersError) throw ordersError;
+
+  const normalizedOrders = (orders ?? []).map(normalizeOrder);
+  const totals = computeSellerTotals(seller as Seller, normalizedOrders);
+  return { ...(seller as Seller), ...totals };
 }
 
 /* ---------------- MOST VIEWED ---------------- */
 
-export function apiMostCheckedToday(limit = 10): Product[] {
-  const db = loadDb();
-  return [...db.products]
-    .sort((a, b) => b.views - a.views)
-    .slice(0, limit);
+export async function apiMostCheckedToday(limit = 10): Promise<Product[]> {
+  if (!hasSupabase) {
+    const db = loadDb();
+    return [...db.products]
+      .sort((a, b) => b.views - a.views)
+      .slice(0, limit);
+  }
+
+  const { data, error } = await supabase
+    .from("products")
+    .select("*")
+    .order("views", { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return (data ?? []).map(normalizeProduct);
 }
 
 /* ---------------- ✅ ADDED FUNCTIONS ---------------- */
 
-export function apiGetProduct(id: string) {
-  const db = loadDb();
+export async function apiGetProduct(id: string) {
+  if (!hasSupabase) {
+    const db = loadDb();
+    const product = db.products.find((p) => p.id === id);
+    if (!product) throw new Error("Product not found");
+    const seller = db.sellers.find((s) => s.id === product.seller_id);
+    const reviews = db.reviews.filter((r) => r.product_id === id);
+    const comments = db.comments.filter((c) => c.product_id === id);
+    return {
+      ...product,
+      seller_name: seller?.name,
+      reviews,
+      comments,
+    };
+  }
 
-  const product = db.products.find((p) => p.id === id);
-  if (!product) throw new Error("Product not found");
+  const [
+    { data: product, error: productError },
+    { data: reviews, error: reviewsError },
+    { data: comments, error: commentsError },
+  ] = await Promise.all([
+    supabase.from("products").select("*").eq("id", id).single(),
+    supabase
+      .from("reviews")
+      .select("*")
+      .eq("product_id", id)
+      .order("created_at", { ascending: false }),
+    supabase
+      .from("comments")
+      .select("*")
+      .eq("product_id", id)
+      .order("created_at", { ascending: false }),
+  ]);
 
-  const seller = db.sellers.find((s) => s.id === product.seller_id);
-
-  const reviews = db.reviews.filter((r) => r.product_id === id);
-  const comments = db.comments.filter((c) => c.product_id === id);
+  if (productError || !product) throw new Error("Product not found");
+  if (reviewsError) throw reviewsError;
+  if (commentsError) throw commentsError;
 
   return {
-    ...product,
-    seller_name: seller?.name,
-    reviews,
-    comments,
+    ...normalizeProduct(product),
+    reviews: (reviews ?? []) as Review[],
+    comments: (comments ?? []) as Comment[],
   };
 }
 
-export function apiListSellerProducts(sellerName: string): Product[] {
-  const db = loadDb();
+export async function apiListSellerProducts(sellerName: string): Promise<Product[]> {
+  if (!sellerName.trim()) return [];
+  if (!hasSupabase) {
+    const db = loadDb();
+    const seller = db.sellers.find(
+      (s) => s.name.toLowerCase() === sellerName.toLowerCase()
+    );
+    if (!seller) return [];
+    return db.products.filter((p) => p.seller_id === seller.id);
+  }
 
-  const seller = db.sellers.find(
-    (s) => s.name.toLowerCase() === sellerName.toLowerCase()
-  );
-
-  if (!seller) return [];
-
-  return db.products.filter((p) => p.seller_id === seller.id);
+  const { data, error } = await supabase
+    .from("products")
+    .select("*")
+    .ilike("seller_name", sellerName.trim())
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map(normalizeProduct);
 }

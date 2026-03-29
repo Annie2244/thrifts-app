@@ -18,7 +18,7 @@ export default function MyListingsPage() {
     (async () => {
       setLoading(true);
       try {
-        const list = sellerName.trim() ? apiListSellerProducts(sellerName) : [];
+        const list = sellerName.trim() ? await apiListSellerProducts(sellerName) : [];
         if (!alive) return;
         setItems(list);
       } catch {

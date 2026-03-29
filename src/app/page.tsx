@@ -22,7 +22,9 @@ export default function Home() {
         const top = await apiMostCheckedToday(10);
         if (!alive) return;
         setMostChecked(top);
-        setLatest(apiListProducts().slice(0, 10));
+        const latestList = await apiListProducts();
+        if (!alive) return;
+        setLatest(latestList.slice(0, 10));
       } catch {
         if (!alive) return;
         setMostChecked([]);
@@ -74,7 +76,7 @@ export default function Home() {
       }
 
       if (invalidIds.length) {
-        apiRemoveProductsByIds(invalidIds);
+        await apiRemoveProductsByIds(invalidIds);
         setLatest((prev) => prev.filter((p) => !invalidIds.includes(p.id)));
         setMostChecked((prev) => prev.filter((p) => !invalidIds.includes(p.id)));
       }
@@ -100,7 +102,7 @@ export default function Home() {
               <span className="brand-accent">.</span>
             </h1>
             <p className="text-black/70 max-w-xl">
-              Your space to thrift, sell, and shine. Not just my closet, yours too.
+              Your space to thrift, sell and shine. Not just my closet, yours too.
             </p>
             <div className="flex items-center gap-3 pt-2">
               <Link

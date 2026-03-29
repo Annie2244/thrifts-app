@@ -1,9 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { apiListProducts } from "../../lib/api/marketplace";
 import { CATEGORY_OPTIONS } from "../../lib/config";
-import type { ProductCondition } from "../../lib/types";
+import type { Product, ProductCondition } from "../../lib/types";
 import ProductCard from "../../components/ProductCard";
 
 const CONDITIONS: ProductCondition[] = ["Excellent", "Good", "Fair", "Vintage"];
@@ -14,18 +14,40 @@ export default function SearchClient() {
   const [condition, setCondition] = useState<string>("");
   const [minPrice, setMinPrice] = useState("");
   const [maxPrice, setMaxPrice] = useState("");
+  const [results, setResults] = useState<Product[]>([]);
+  const [loading, setLoading] = useState(false);
 
-  const results = useMemo(() => {
+  const filters = useMemo(() => {
     const min = minPrice ? Number(minPrice) : undefined;
     const max = maxPrice ? Number(maxPrice) : undefined;
-    return apiListProducts({
+    return {
       q: q.trim() || undefined,
       category: category || undefined,
       condition: condition || undefined,
       minPrice: Number.isFinite(min as number) ? min : undefined,
       maxPrice: Number.isFinite(max as number) ? max : undefined,
-    });
+    };
   }, [q, category, condition, minPrice, maxPrice]);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      setLoading(true);
+      try {
+        const list = await apiListProducts(filters);
+        if (!alive) return;
+        setResults(list);
+      } catch {
+        if (!alive) return;
+        setResults([]);
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [filters]);
 
   return (
     <main className="max-w-6xl mx-auto px-4 py-6">
@@ -89,7 +111,13 @@ export default function SearchClient() {
         </div>
       </div>
 
-      {results.length === 0 ? (
+      {loading ? (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="h-[260px] rounded-2xl bg-black/5 animate-pulse" />
+          ))}
+        </div>
+      ) : results.length === 0 ? (
         <div className="rounded-3xl border border-black/10 bg-white p-7 text-center text-black/70">
           No results. Try a different search or filter.
         </div>

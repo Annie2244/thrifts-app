@@ -5,19 +5,55 @@ import Link from "next/link";
 import { useUserProfile } from "../../components/providers/UserProvider";
 import { apiGetProduct, apiInbox } from "../../lib/api/marketplace";
 import AuthGate from "../../components/AuthGate";
+import type { Message } from "../../lib/types";
 
 function pickInboxName(buyerName: string, sellerName: string, mode: "buyer" | "seller") {
   if (mode === "buyer") return buyerName;
   return sellerName;
 }
 
+type ThreadRow = {
+  threadKey: string;
+  product_id: string;
+  other: string;
+  lastMessageAt: string;
+  preview: string;
+};
+
+function buildThreads(messages: Message[], inboxName: string): ThreadRow[] {
+  const byKey = new Map<string, ThreadRow>();
+  const inboxLower = inboxName.trim().toLowerCase();
+
+  for (const m of messages) {
+    const sender = m.sender.trim();
+    const receiver = m.receiver.trim();
+    const other = sender.toLowerCase() === inboxLower ? receiver : sender;
+
+    const [p1, p2] = [sender, receiver].sort((a, b) => a.localeCompare(b));
+    const threadKey = `${m.product_id}::${p1}::${p2}`;
+
+    const existing = byKey.get(threadKey);
+    if (!existing || existing.lastMessageAt < m.created_at) {
+      byKey.set(threadKey, {
+        threadKey,
+        product_id: m.product_id,
+        other,
+        lastMessageAt: m.created_at,
+        preview: m.message,
+      });
+    }
+  }
+
+  return Array.from(byKey.values()).sort((a, b) =>
+    a.lastMessageAt < b.lastMessageAt ? 1 : -1
+  );
+}
+
 export default function MessagesInboxPage() {
   const { buyerName, sellerName } = useUserProfile();
   const [mode, setMode] = useState<"buyer" | "seller">("buyer");
   const [mounted, setMounted] = useState(false);
-  const [threads, setThreads] = useState<
-    { threadKey: string; product_id: string; other: string; lastMessageAt: string; preview: string }[]
-  >([]);
+  const [threads, setThreads] = useState<ThreadRow[]>([]);
   const [productThumbs, setProductThumbs] = useState<Map<string, string>>(new Map());
   const [loading, setLoading] = useState(true);
 
@@ -43,9 +79,10 @@ export default function MessagesInboxPage() {
         }
         const t = await apiInbox(inboxName);
         if (!alive) return;
-        setThreads(t);
+        const nextThreads = buildThreads(t, inboxName);
+        setThreads(nextThreads);
 
-        const uniqueProductIds = Array.from(new Set(t.map((x) => x.product_id)));
+        const uniqueProductIds = Array.from(new Set(nextThreads.map((x) => x.product_id)));
         const m = new Map<string, string>();
         for (const pid of uniqueProductIds) {
           try {

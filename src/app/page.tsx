@@ -5,20 +5,31 @@ import Link from "next/link";
 import { ArrowRight } from "lucide-react";
 import type { Product } from "../lib/types";
 import { CATEGORY_OPTIONS } from "../lib/config";
-import { apiListProducts, apiMostCheckedToday, apiRemoveProductsByIds } from "../lib/api/marketplace";
+import {
+  apiListCommentCounts,
+  apiListProducts,
+  apiMostCheckedToday,
+  apiRemoveProductsByIds,
+} from "../lib/api/marketplace";
 import ProductCard from "../components/ProductCard";
-import { formatKSh } from "../lib/format";
+
+const CATEGORY_STORAGE_KEY = "thrift-category-previews-v1";
 
 export default function Home() {
   const [mostChecked, setMostChecked] = useState<Product[]>([]);
   const [latest, setLatest] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
+  const [categoryPhotos, setCategoryPhotos] = useState<Record<string, string>>({});
+  const [categoryPrices, setCategoryPrices] = useState<Record<string, string>>({});
+  const [commentCounts, setCommentCounts] = useState<Record<string, number>>({});
   const didClean = useRef(false);
 
   useEffect(() => {
     let alive = true;
-    (async () => {
+
+    const refresh = async (withLoading: boolean) => {
       try {
+        if (withLoading) setLoading(true);
         const top = await apiMostCheckedToday(10);
         if (!alive) return;
         setMostChecked(top);
@@ -30,11 +41,25 @@ export default function Home() {
         setMostChecked([]);
         setLatest([]);
       } finally {
-        if (alive) setLoading(false);
+        if (alive && withLoading) setLoading(false);
       }
-    })();
+    };
+
+    refresh(true);
+
+    const onFocus = () => {
+      refresh(false);
+    };
+
+    if (typeof window !== "undefined") {
+      window.addEventListener("focus", onFocus);
+    }
+
     return () => {
       alive = false;
+      if (typeof window !== "undefined") {
+        window.removeEventListener("focus", onFocus);
+      }
     };
   }, []);
 
@@ -85,7 +110,73 @@ export default function Home() {
     run();
   }, [loading, latest, mostChecked]);
 
-  const featured = mostChecked.slice(0, 4);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem(CATEGORY_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as {
+        photos?: Record<string, string>;
+        prices?: Record<string, string>;
+      };
+      if (parsed.photos) setCategoryPhotos(parsed.photos);
+      if (parsed.prices) setCategoryPrices(parsed.prices);
+    } catch {
+      // Ignore invalid storage data.
+    }
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const ids = Array.from(new Set([...latest, ...mostChecked].map((p) => p.id)));
+      if (!ids.length) {
+        if (alive) setCommentCounts({});
+        return;
+      }
+      try {
+        const counts = await apiListCommentCounts(ids);
+        if (alive) setCommentCounts(counts);
+      } catch {
+        if (alive) setCommentCounts({});
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [latest, mostChecked]);
+
+  const slugify = (label: string) =>
+    label
+      .toLowerCase()
+      .replace(/&/g, "and")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "");
+
+  const categoryCards = CATEGORY_OPTIONS.map((label) => ({
+    id: slugify(label),
+    label,
+  }));
+
+  const handleDeleteProduct = async (id: string) => {
+    if (typeof window !== "undefined") {
+      const ok = window.confirm("Delete this listing?");
+      if (!ok) return;
+    }
+    try {
+      await apiRemoveProductsByIds([id]);
+      setLatest((prev) => prev.filter((p) => p.id !== id));
+      setMostChecked((prev) => prev.filter((p) => p.id !== id));
+      setCommentCounts((prev) => {
+        if (!prev[id]) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    } catch {
+      // ignore delete failures for now
+    }
+  };
 
   return (
     <main className="max-w-6xl mx-auto px-4 py-6">
@@ -98,7 +189,7 @@ export default function Home() {
               <span className="text-[color:var(--accent)]">&bull;</span> Multi-vendor
             </div>
             <h1 className="text-3xl md:text-4xl font-extrabold leading-tight brand-title">
-              Annie's Closet Hub
+              The Thrift Circle
               <span className="brand-accent">.</span>
             </h1>
             <p className="text-black/70 max-w-xl">
@@ -120,20 +211,15 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3 w-full md:w-[320px]">
-            {featured.map((p) => (
-              <div key={p.id} className="rounded-2xl border border-black/10 overflow-hidden">
-                <Link href={`/product/${p.id}`}>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={p.images?.[0]} alt={p.title} className="h-28 w-full object-cover bg-gray-100" />
-                </Link>
-                <div className="p-3">
-                  <div className="text-sm font-semibold truncate">{p.title}</div>
-                  <div className="text-green-800 font-bold">{formatKSh(p.price)}</div>
-                </div>
-              </div>
-            ))}
+          <div className="flex items-center justify-center w-full md:w-[320px]">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/thrift-circle-logo.png"
+              alt="The Thrift Circle logo"
+              className="h-40 w-40 md:h-48 md:w-48 rounded-3xl object-contain border border-black/10 bg-white"
+            />
           </div>
+
         </div>
       </section>
 
@@ -159,7 +245,11 @@ export default function Home() {
           <div className="flex gap-3 overflow-x-auto pb-2 snap-x snap-mandatory">
             {latest.map((p) => (
               <div key={p.id} className="min-w-[220px] snap-start">
-                <ProductCard product={p} />
+                <ProductCard
+                  product={p}
+                  commentCount={commentCounts[p.id] ?? 0}
+                  onDelete={handleDeleteProduct}
+                />
               </div>
             ))}
           </div>
@@ -190,7 +280,11 @@ export default function Home() {
           <div className="flex gap-3 overflow-x-auto pb-2 snap-x snap-mandatory">
             {mostChecked.map((p) => (
               <div key={p.id} className="min-w-[220px] snap-start">
-                <ProductCard product={p} />
+                <ProductCard
+                  product={p}
+                  commentCount={commentCounts[p.id] ?? 0}
+                  onDelete={handleDeleteProduct}
+                />
               </div>
             ))}
           </div>
@@ -199,19 +293,40 @@ export default function Home() {
 
       <section className="mt-7">
         <h2 className="text-lg md:text-xl font-extrabold">Browse by Category</h2>
-        <div className="mt-3 flex flex-wrap gap-2">
-          {CATEGORY_OPTIONS.map((cat) => (
-            <Link
-              key={cat}
-              href={`/search?category=${encodeURIComponent(cat)}`}
-              className="rounded-full border border-black/10 bg-white px-3 py-2 text-sm font-semibold text-black/80 hover:border-red-900/20 hover:text-red-800"
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+          {categoryCards.map((cat) => (
+            <div
+              key={cat.id}
+              className="rounded-3xl border border-black/10 bg-white p-4 shadow-sm flex items-center justify-between"
             >
-              {cat}
-            </Link>
+              <div className="flex items-center gap-3">
+                {categoryPhotos[cat.id] ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={categoryPhotos[cat.id]}
+                    alt={`${cat.label} preview`}
+                    className="h-12 w-12 rounded-2xl object-cover border border-black/10 bg-black/5"
+                  />
+                ) : null}
+                <div>
+                  <div className="text-base font-bold">{cat.label}</div>
+                  {categoryPrices[cat.id] ? (
+                    <div className="text-sm text-black/60">
+                      KSh {categoryPrices[cat.id]}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+              <Link
+                href={`/search?category=${encodeURIComponent(cat.label)}`}
+                className="inline-flex items-center justify-center px-4 py-2 rounded-full border border-black/10 bg-white text-sm font-semibold text-black/80 hover:border-black/20"
+              >
+                Browse
+              </Link>
+            </div>
           ))}
         </div>
       </section>
     </main>
   );
 }
-

@@ -2,14 +2,22 @@
 
 import React, { useMemo } from "react";
 import Link from "next/link";
-import { Heart, Eye } from "lucide-react";
+import { Heart, Eye, MessageCircle } from "lucide-react";
 import clsx from "clsx";
 import type { Product } from "../lib/types";
 import { formatKSh, formatCompactNumber } from "../lib/format";
 import ConditionBadge from "./ConditionBadge";
 import { useFavorites } from "./providers/FavoritesProvider";
 
-export default function ProductCard({ product }: { product: Product }) {
+export default function ProductCard({
+  product,
+  commentCount,
+  onDelete,
+}: {
+  product: Product;
+  commentCount?: number;
+  onDelete?: (id: string) => void;
+}) {
   const { isFavorite, toggleFavorite } = useFavorites();
   const favorited = isFavorite(product.id);
   const isNew = (() => {
@@ -35,7 +43,7 @@ export default function ProductCard({ product }: { product: Product }) {
             <img
               src={primaryImg}
               alt={product.title}
-              className="h-44 w-full object-cover bg-gray-100"
+              className="h-44 w-full object-contain bg-gray-100"
               loading="lazy"
             />
           ) : (
@@ -72,6 +80,21 @@ export default function ProductCard({ product }: { product: Product }) {
       </div>
 
       <div className="p-4 space-y-2">
+        {onDelete ? (
+          <div className="flex items-center justify-between">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onDelete(product.id);
+              }}
+              className="text-xs font-semibold text-red-700"
+            >
+              Delete
+            </button>
+          </div>
+        ) : null}
         <Link href={`/product/${product.id}`}>
           <h3 className="font-semibold text-sm text-black">
             {product.title}
@@ -81,8 +104,15 @@ export default function ProductCard({ product }: { product: Product }) {
         <p className="text-green-700 font-bold">{priceText}</p>
 
         <div className="flex justify-between text-xs text-black/60">
-          <span className="flex items-center gap-1">
-            <Eye size={14} /> {formatCompactNumber(product.views)} views
+          <span className="flex items-center gap-2">
+            <span className="flex items-center gap-1">
+              <Eye size={14} /> {formatCompactNumber(product.views)} views
+            </span>
+            {typeof commentCount === "number" ? (
+              <span className="flex items-center gap-1">
+                <MessageCircle size={14} /> {formatCompactNumber(commentCount)} comments
+              </span>
+            ) : null}
           </span>
           <span>{product.category}</span>
         </div>

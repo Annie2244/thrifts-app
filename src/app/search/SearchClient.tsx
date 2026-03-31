@@ -1,14 +1,27 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { apiListProducts } from "../../lib/api/marketplace";
 import { CATEGORY_OPTIONS } from "../../lib/config";
 import type { Product, ProductCondition } from "../../lib/types";
 import ProductCard from "../../components/ProductCard";
 
 const CONDITIONS: ProductCondition[] = ["Excellent", "Good", "Fair", "Vintage"];
+const CATEGORY_STORAGE_KEY = "thrift-category-previews-v1";
+const slugify = (label: string) =>
+  label
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "");
+const CATEGORY_ID_BY_LABEL: Record<string, string> = Object.fromEntries(
+  CATEGORY_OPTIONS.map((label) => [label, slugify(label)])
+);
 
 export default function SearchClient() {
+  const searchParams = useSearchParams();
   const [q, setQ] = useState("");
   const [category, setCategory] = useState<string>("");
   const [condition, setCondition] = useState<string>("");
@@ -16,6 +29,47 @@ export default function SearchClient() {
   const [maxPrice, setMaxPrice] = useState("");
   const [results, setResults] = useState<Product[]>([]);
   const [loading, setLoading] = useState(false);
+  const [allListings, setAllListings] = useState<Product[]>([]);
+  const [loadingAll, setLoadingAll] = useState(false);
+  const [categoryPhoto, setCategoryPhoto] = useState<string>("");
+  const [categoryPrice, setCategoryPrice] = useState<string>("");
+  const didHydrateCategory = useRef(false);
+
+  const categoryId = category ? CATEGORY_ID_BY_LABEL[category] : "";
+
+  useEffect(() => {
+    if (didHydrateCategory.current) return;
+    const paramCategory = searchParams.get("category") ?? "";
+    if (paramCategory) {
+      setCategory(paramCategory);
+      didHydrateCategory.current = true;
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (!categoryId || typeof window === "undefined") {
+      setCategoryPhoto("");
+      setCategoryPrice("");
+      return;
+    }
+    try {
+      const raw = window.localStorage.getItem(CATEGORY_STORAGE_KEY);
+      if (!raw) {
+        setCategoryPhoto("");
+        setCategoryPrice("");
+        return;
+      }
+      const parsed = JSON.parse(raw) as {
+        photos?: Record<string, string>;
+        prices?: Record<string, string>;
+      };
+      setCategoryPhoto(parsed.photos?.[categoryId] ?? "");
+      setCategoryPrice(parsed.prices?.[categoryId] ?? "");
+    } catch {
+      setCategoryPhoto("");
+      setCategoryPrice("");
+    }
+  }, [categoryId]);
 
   const filters = useMemo(() => {
     const min = minPrice ? Number(minPrice) : undefined;
@@ -48,6 +102,26 @@ export default function SearchClient() {
       alive = false;
     };
   }, [filters]);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      setLoadingAll(true);
+      try {
+        const list = await apiListProducts();
+        if (!alive) return;
+        setAllListings(list);
+      } catch {
+        if (!alive) return;
+        setAllListings([]);
+      } finally {
+        if (alive) setLoadingAll(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   return (
     <main className="max-w-6xl mx-auto px-4 py-6">
@@ -111,6 +185,38 @@ export default function SearchClient() {
         </div>
       </div>
 
+      {categoryId ? (
+        <div className="rounded-3xl border border-black/10 bg-white p-4 md:p-5 mb-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-semibold text-black/60">Category preview</div>
+              <div className="text-base font-bold">{category}</div>
+            </div>
+            <Link
+              href={`/category/${categoryId}`}
+              className="inline-flex items-center justify-center px-4 py-2 rounded-full border border-black/10 bg-white text-sm font-semibold text-black/80 hover:border-black/20"
+            >
+              Add photo & price
+            </Link>
+          </div>
+          <div className="mt-3 flex items-center gap-3">
+            <div className="h-20 w-28 rounded-2xl border border-black/10 bg-black/5 overflow-hidden">
+              {categoryPhoto ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={categoryPhoto} alt={`${category} preview`} className="h-full w-full object-cover" />
+              ) : (
+                <div className="h-full w-full flex items-center justify-center text-xs text-black/50">
+                  No photo
+                </div>
+              )}
+            </div>
+            <div className="text-sm text-black/70">
+              {categoryPrice ? `Price: KSh ${categoryPrice}` : "No price yet"}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {loading ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {Array.from({ length: 6 }).map((_, i) => (
@@ -128,6 +234,31 @@ export default function SearchClient() {
           ))}
         </div>
       )}
+
+      <section className="mt-8">
+        <div className="flex items-end justify-between gap-3 mb-3">
+          <h2 className="text-lg md:text-xl font-extrabold">All Listings</h2>
+          <div className="text-sm text-black/60">{allListings.length} item(s)</div>
+        </div>
+
+        {loadingAll ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="h-[260px] rounded-2xl bg-black/5 animate-pulse" />
+            ))}
+          </div>
+        ) : allListings.length === 0 ? (
+          <div className="rounded-3xl border border-black/10 bg-white p-7 text-center text-black/70">
+            No listings yet.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {allListings.map((p) => (
+              <ProductCard key={p.id} product={p} />
+            ))}
+          </div>
+        )}
+      </section>
     </main>
   );
 }

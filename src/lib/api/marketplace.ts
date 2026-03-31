@@ -24,6 +24,7 @@ type MockDb = {
 };
 
 const STORAGE_KEY = "thrifts_mock_db_v1";
+const DELETED_IDS_KEY = "thrifts_deleted_ids_v1";
 const FALLBACK_IMAGE =
   "https://images.unsplash.com/photo-1521335629791-ce4aec67dd53?auto=format&fit=crop&w=1200&q=80";
 
@@ -123,16 +124,21 @@ export function apiCleanupInvalidImages() {
 
 export async function apiRemoveProductsByIds(ids: string[]) {
   if (!ids.length) return { removed: 0 };
-  if (!hasSupabase) {
+  let removedLocal = 0;
+  if (typeof window !== "undefined") {
     const db = loadDb();
     const before = db.products.length;
     const set = new Set(ids);
     const products = db.products.filter((p) => !set.has(p.id));
-    const removed = before - products.length;
-    if (removed > 0) {
+    removedLocal = before - products.length;
+    if (removedLocal > 0) {
       saveDb({ ...db, products });
     }
-    return { removed };
+    markDeleted(ids);
+  }
+
+  if (!hasSupabase) {
+    return { removed: removedLocal };
   }
 
   const { data, error } = await supabase
@@ -140,8 +146,15 @@ export async function apiRemoveProductsByIds(ids: string[]) {
     .delete()
     .in("id", ids)
     .select("id");
-  if (error) throw error;
-  return { removed: data?.length ?? 0 };
+  if (error) {
+    if (process.env.NODE_ENV !== "production") {
+      // eslint-disable-next-line no-console
+      console.warn("[supabase] Delete products failed; using local delete only.", error);
+      return { removed: removedLocal };
+    }
+    throw error;
+  }
+  return { removed: data?.length ?? removedLocal };
 }
 
 /* ---------------- SEED ---------------- */
@@ -213,6 +226,33 @@ function saveDb(db: MockDb) {
   } catch {}
 }
 
+function loadDeletedIds(): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = window.localStorage.getItem(DELETED_IDS_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw) as string[];
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter(Boolean));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveDeletedIds(ids: Set<string>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(DELETED_IDS_KEY, JSON.stringify(Array.from(ids)));
+  } catch {}
+}
+
+function markDeleted(ids: string[]) {
+  if (typeof window === "undefined") return;
+  const set = loadDeletedIds();
+  ids.filter(Boolean).forEach((id) => set.add(id));
+  saveDeletedIds(set);
+}
+
 /* ---------------- SELLERS ---------------- */
 
 export function apiUpsertSellerByName(name: string): Seller {
@@ -243,6 +283,10 @@ export function apiUpsertSellerByName(name: string): Seller {
 function listProductsLocal(filters?: MarketplaceFilters): Product[] {
   const db = loadDb();
   let items = [...db.products];
+  const deleted = loadDeletedIds();
+  if (deleted.size) {
+    items = items.filter((p) => !deleted.has(p.id));
+  }
 
   if (filters?.q) {
     const q = filters.q.toLowerCase();
@@ -304,8 +348,69 @@ export async function apiListProducts(filters?: MarketplaceFilters): Promise<Pro
   }
 
   const { data, error } = await query.order("created_at", { ascending: false });
-  if (error) throw error;
-  return (data ?? []).map(normalizeProduct);
+  if (error) {
+    if (process.env.NODE_ENV !== "production") {
+      // eslint-disable-next-line no-console
+      console.warn("[supabase] List products failed; falling back to local DB.", error);
+      return listProductsLocal(filters);
+    }
+    throw error;
+  }
+  const deleted = loadDeletedIds();
+  const normalized = (data ?? [])
+    .map(normalizeProduct)
+    .filter((p) => !deleted.has(p.id));
+  if (process.env.NODE_ENV !== "production" && normalized.length === 0) {
+    const local = listProductsLocal(filters);
+    if (local.length) return local;
+  }
+  return normalized;
+}
+
+export async function apiListCommentCounts(productIds: string[]): Promise<Record<string, number>> {
+  const counts: Record<string, number> = {};
+  const ids = productIds.filter(Boolean);
+  ids.forEach((id) => {
+    counts[id] = 0;
+  });
+  if (!ids.length) return counts;
+
+  if (!hasSupabase) {
+    const db = loadDb();
+    const set = new Set(ids);
+    for (const c of db.comments) {
+      if (!set.has(c.product_id)) continue;
+      counts[c.product_id] = (counts[c.product_id] ?? 0) + 1;
+    }
+    return counts;
+  }
+
+  const { data, error } = await supabase
+    .from("comments")
+    .select("product_id")
+    .in("product_id", ids);
+  if (error) {
+    if (process.env.NODE_ENV !== "production") {
+      // eslint-disable-next-line no-console
+      console.warn("[supabase] List comment counts failed; falling back to local DB.", error);
+      const db = loadDb();
+      const set = new Set(ids);
+      for (const c of db.comments) {
+        if (!set.has(c.product_id)) continue;
+        counts[c.product_id] = (counts[c.product_id] ?? 0) + 1;
+      }
+      return counts;
+    }
+    throw error;
+  }
+
+  (data ?? []).forEach((row) => {
+    const id = (row as { product_id?: string }).product_id;
+    if (!id) return;
+    counts[id] = (counts[id] ?? 0) + 1;
+  });
+
+  return counts;
 }
 
 export async function apiCreateProduct(input: {
@@ -325,7 +430,7 @@ export async function apiCreateProduct(input: {
           "https://images.unsplash.com/photo-1521335629791-ce4aec67dd53?auto=format&fit=crop&w=1200&q=80",
         ];
 
-  if (!hasSupabase) {
+  const createLocal = () => {
     const db = loadDb();
     const seller = apiUpsertSellerByName(input.sellerName);
     const product: Product = {
@@ -344,6 +449,10 @@ export async function apiCreateProduct(input: {
     db.products.unshift(product);
     saveDb(db);
     return product;
+  };
+
+  if (!hasSupabase) {
+    return createLocal();
   }
 
   const product: Product = {
@@ -366,7 +475,15 @@ export async function apiCreateProduct(input: {
     .insert(product)
     .select("*")
     .single();
-  if (error) throw error;
+  if (error) {
+    // Fall back to local in dev if Supabase is misconfigured or blocked.
+    if (process.env.NODE_ENV !== "production") {
+      // eslint-disable-next-line no-console
+      console.warn("[supabase] Create product failed; falling back to local DB.", error);
+      return createLocal();
+    }
+    throw error;
+  }
   return normalizeProduct(data);
 }
 
@@ -387,11 +504,15 @@ export async function apiCreateReview(input: {
     created_at: nowIso(),
   };
 
-  if (!hasSupabase) {
+  const createLocal = () => {
     const db = loadDb();
     db.reviews.unshift(review);
     saveDb(db);
     return review;
+  };
+
+  if (!hasSupabase) {
+    return createLocal();
   }
 
   const { data, error } = await supabase
@@ -399,7 +520,14 @@ export async function apiCreateReview(input: {
     .insert(review)
     .select("*")
     .single();
-  if (error) throw error;
+  if (error) {
+    if (process.env.NODE_ENV !== "production") {
+      // eslint-disable-next-line no-console
+      console.warn("[supabase] Create review failed; falling back to local DB.", error);
+      return createLocal();
+    }
+    throw error;
+  }
   return data as Review;
 }
 
@@ -418,11 +546,15 @@ export async function apiCreateComment(input: {
     created_at: nowIso(),
   };
 
-  if (!hasSupabase) {
+  const createLocal = () => {
     const db = loadDb();
     db.comments.unshift(c);
     saveDb(db);
     return c;
+  };
+
+  if (!hasSupabase) {
+    return createLocal();
   }
 
   const { data, error } = await supabase
@@ -430,7 +562,14 @@ export async function apiCreateComment(input: {
     .insert(c)
     .select("*")
     .single();
-  if (error) throw error;
+  if (error) {
+    if (process.env.NODE_ENV !== "production") {
+      // eslint-disable-next-line no-console
+      console.warn("[supabase] Create comment failed; falling back to local DB.", error);
+      return createLocal();
+    }
+    throw error;
+  }
   return data as Comment;
 }
 
@@ -709,7 +848,9 @@ export async function apiSellerStats(sellerName: string) {
 export async function apiMostCheckedToday(limit = 10): Promise<Product[]> {
   if (!hasSupabase) {
     const db = loadDb();
+    const deleted = loadDeletedIds();
     return [...db.products]
+      .filter((p) => !deleted.has(p.id))
       .sort((a, b) => b.views - a.views)
       .slice(0, limit);
   }
@@ -720,12 +861,26 @@ export async function apiMostCheckedToday(limit = 10): Promise<Product[]> {
     .order("views", { ascending: false })
     .limit(limit);
   if (error) throw error;
-  return (data ?? []).map(normalizeProduct);
+  const deleted = loadDeletedIds();
+  const normalized = (data ?? [])
+    .map(normalizeProduct)
+    .filter((p) => !deleted.has(p.id));
+  if (process.env.NODE_ENV !== "production" && normalized.length === 0) {
+    const db = loadDb();
+    const local = [...db.products]
+      .filter((p) => !deleted.has(p.id))
+      .sort((a, b) => b.views - a.views)
+      .slice(0, limit);
+    if (local.length) return local;
+  }
+  return normalized;
 }
 
 /* ---------------- ✅ ADDED FUNCTIONS ---------------- */
 
 export async function apiGetProduct(id: string) {
+  const deleted = loadDeletedIds();
+  if (deleted.has(id)) throw new Error("Product not found");
   if (!hasSupabase) {
     const db = loadDb();
     const product = db.products.find((p) => p.id === id);
@@ -759,9 +914,31 @@ export async function apiGetProduct(id: string) {
       .order("created_at", { ascending: false }),
   ]);
 
-  if (productError || !product) throw new Error("Product not found");
-  if (reviewsError) throw reviewsError;
-  if (commentsError) throw commentsError;
+  if (productError || !product || reviewsError || commentsError) {
+    if (process.env.NODE_ENV !== "production") {
+      // eslint-disable-next-line no-console
+      console.warn("[supabase] Get product failed; falling back to local DB.", {
+        productError,
+        reviewsError,
+        commentsError,
+      });
+      const db = loadDb();
+      const product = db.products.find((p) => p.id === id);
+      if (!product) throw new Error("Product not found");
+      const seller = db.sellers.find((s) => s.id === product.seller_id);
+      const reviews = db.reviews.filter((r) => r.product_id === id);
+      const comments = db.comments.filter((c) => c.product_id === id);
+      return {
+        ...product,
+        seller_name: seller?.name,
+        reviews,
+        comments,
+      };
+    }
+    if (productError || !product) throw new Error("Product not found");
+    if (reviewsError) throw reviewsError;
+    if (commentsError) throw commentsError;
+  }
 
   return {
     ...normalizeProduct(product),
@@ -778,7 +955,8 @@ export async function apiListSellerProducts(sellerName: string): Promise<Product
       (s) => s.name.toLowerCase() === sellerName.toLowerCase()
     );
     if (!seller) return [];
-    return db.products.filter((p) => p.seller_id === seller.id);
+    const deleted = loadDeletedIds();
+    return db.products.filter((p) => p.seller_id === seller.id && !deleted.has(p.id));
   }
 
   const { data, error } = await supabase
@@ -787,5 +965,6 @@ export async function apiListSellerProducts(sellerName: string): Promise<Product
     .ilike("seller_name", sellerName.trim())
     .order("created_at", { ascending: false });
   if (error) throw error;
-  return (data ?? []).map(normalizeProduct);
+  const deleted = loadDeletedIds();
+  return (data ?? []).map(normalizeProduct).filter((p) => !deleted.has(p.id));
 }

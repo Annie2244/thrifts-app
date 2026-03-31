@@ -2,11 +2,14 @@ export type ProductCondition = "Excellent" | "Good" | "Fair" | "Vintage";
 
 export type ProductCategory =
   | "Vintage Shirts"
-  | "Classic Dresses"
-  | "Branded Thrift"
-  | "Outerwear"
+  | "Dresses"
+  | "Merchandise wears"
+  | "Jorts"
   | "Bottoms"
-  | "Accessories";
+  | "Accessories"
+  | "Denims"
+  | "Coach bags"
+  | "Leather jackets";
 
 export type OrderStatus = "pending" | "shipped" | "delivered";
 

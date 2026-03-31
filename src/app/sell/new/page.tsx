@@ -1,24 +1,18 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { toast } from "react-hot-toast";
+import { nanoid } from "nanoid";
 import { apiCreateProduct } from "../../../lib/api/marketplace";
-import { CONDITION_OPTIONS, CATEGORY_OPTIONS } from "../../../lib/config";
+import { CONDITION_OPTIONS, CATEGORY_OPTIONS, STORAGE_BUCKET_PRODUCT_IMAGES } from "../../../lib/config";
 import type { ProductCondition } from "../../../lib/types";
 import { parseSizes } from "../../../lib/format";
 import { useUserProfile } from "../../../components/providers/UserProvider";
 import AuthGate from "../../../components/AuthGate";
-
-async function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("Failed to read file"));
-    reader.onload = () => resolve(String(reader.result));
-    reader.readAsDataURL(file);
-  });
-}
+import { fileToDataUrl } from "../../../lib/image";
+import { hasSupabase, supabase } from "../../../lib/supabase";
 
 export default function NewListingPage() {
   const router = useRouter();
@@ -31,29 +25,53 @@ export default function NewListingPage() {
   const [category, setCategory] = useState<string>(CATEGORY_OPTIONS[0]);
   const [size, setSize] = useState<string>("M, L");
   const [condition, setCondition] = useState<ProductCondition>("Good");
-  const [images, setImages] = useState<{ preview: string; file?: File; dataUrl?: string }[]>([]);
+  const [images, setImages] = useState<{ preview: string; dataUrl: string; file?: File }[]>([]);
+  const [imageError, setImageError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const normalizedPrice = price.replace(/[^\d.]/g, "");
+  const parsedPrice = Number(normalizedPrice);
 
   const canSubmit = useMemo(() => {
     return (
       sellerDraft.trim() &&
       title.trim() &&
       description.trim() &&
-      price.trim() &&
-      Number(price) > 0 &&
+      normalizedPrice.trim() &&
+      Number.isFinite(parsedPrice) &&
+      parsedPrice > 0 &&
       images.length > 0 &&
       parseSizes(size).length > 0
     );
-  }, [sellerDraft, title, description, price, images.length, size]);
+  }, [sellerDraft, title, description, normalizedPrice, parsedPrice, images.length, size]);
 
-  const onFiles = (files: FileList | null) => {
+  const onFiles = async (files: FileList | null) => {
     if (!files) return;
-    const list = Array.from(files);
-    const next = list.slice(0, 5).map((file) => ({
-      file,
-      preview: URL.createObjectURL(file),
-    }));
-    setImages(next);
+    setImageError(null);
+
+    const list = Array.from(files).filter((f) => f.type.startsWith("image/"));
+    if (!list.length) {
+      setImageError("Please select image files only.");
+      return;
+    }
+
+    try {
+      const dataUrls = await Promise.all(
+        list.slice(0, 5).map(async (file) => {
+          const dataUrl = await fileToDataUrl(file);
+          return { preview: dataUrl, dataUrl, file };
+        })
+      );
+
+      setImages((prev) => {
+        const merged = [...prev, ...dataUrls];
+        return merged.slice(0, 5);
+      });
+    } catch {
+      setImageError("Failed to read one of the images.");
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
   };
 
   const submit = async (e: React.FormEvent) => {
@@ -64,27 +82,49 @@ export default function NewListingPage() {
     }
     setSubmitting(true);
     try {
-      // Convert previews to data URLs for mock mode persistence.
-      const dataUrls: string[] = [];
-      for (const img of images) {
-        if (img.dataUrl) {
-          dataUrls.push(img.dataUrl);
-          continue;
+      const dataUrls = images.map((img) => img.dataUrl);
+      let imageUrls = dataUrls;
+
+      if (hasSupabase) {
+        const files = images.map((img) => img.file).filter(Boolean) as File[];
+        try {
+          imageUrls = await Promise.all(
+            files.map(async (file) => {
+              const ext = file.name.split(".").pop() || "jpg";
+              const path = `products/${Date.now()}-${nanoid(6)}.${ext}`;
+              const { error } = await supabase.storage
+                .from(STORAGE_BUCKET_PRODUCT_IMAGES)
+                .upload(path, file, {
+                  contentType: file.type || "image/jpeg",
+                  upsert: false,
+                });
+              if (error) throw error;
+              const { data } = supabase.storage
+                .from(STORAGE_BUCKET_PRODUCT_IMAGES)
+                .getPublicUrl(path);
+              return data.publicUrl;
+            })
+          );
+        } catch (err: unknown) {
+          toast.error(
+            err instanceof Error
+              ? err.message
+              : "Image upload failed. Check your Supabase storage bucket."
+          );
+          setSubmitting(false);
+          return;
         }
-        if (!img.file) continue;
-        const data = await fileToDataUrl(img.file);
-        dataUrls.push(data);
       }
 
       const product = await apiCreateProduct({
         sellerName: sellerDraft,
         title,
         description,
-        price: Number(price),
+        price: parsedPrice,
         category,
         size,
         condition,
-        images: dataUrls,
+        images: imageUrls,
       });
 
       setSellerName(sellerDraft);
@@ -148,6 +188,9 @@ export default function NewListingPage() {
               className="mt-1 w-full border border-black/10 rounded-2xl px-3 py-2"
               placeholder="e.g., 2400"
             />
+            {price.trim() && (!Number.isFinite(parsedPrice) || parsedPrice <= 0) ? (
+              <div className="mt-1 text-xs text-red-700 font-semibold">Enter a valid price.</div>
+            ) : null}
           </label>
 
           <label className="block">
@@ -193,17 +236,26 @@ export default function NewListingPage() {
               <div className="font-extrabold">Product Images</div>
               <div className="text-sm text-black/60">Add up to 5 images (supports zoom on the product page).</div>
             </div>
-            <label className="inline-flex items-center justify-center px-4 py-2 rounded-full border border-black/10 bg-white font-extrabold text-sm cursor-pointer">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="inline-flex items-center justify-center px-4 py-2 rounded-full border border-black/10 bg-white font-extrabold text-sm"
+            >
               Upload
-              <input
-                type="file"
-                accept="image/*"
-                multiple
-                className="hidden"
-                onChange={(e) => onFiles(e.target.files)}
-              />
-            </label>
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              className="hidden"
+              onChange={(e) => onFiles(e.currentTarget.files)}
+            />
           </div>
+
+          {imageError ? (
+            <div className="mt-2 text-sm text-red-700 font-semibold">{imageError}</div>
+          ) : null}
 
           {images.length ? (
             <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 gap-3">
